@@ -838,6 +838,16 @@ body:has(.board-editor.is-focus) .topbar { display:none; }
 .session-list strong { font-size:calc(13px * var(--ui-scale)); }
 .session-list small { color:var(--faint); font-size:calc(12px * var(--ui-scale)); }
 .session-current { margin-left:8px; padding:1px 7px; border-radius:6px; background:var(--accent-soft); color:var(--lime); font-size:calc(11px * var(--ui-scale)); font-style:normal; font-weight:600; }
+.storage-meter { display:grid; gap:8px; }
+.storage-meter-text { display:flex; justify-content:space-between; align-items:baseline; gap:12px; flex-wrap:wrap; }
+.storage-meter-text strong { font-size:calc(14px * var(--ui-scale)); }
+.storage-meter-text small { color:var(--muted); font-size:calc(12px * var(--ui-scale)); }
+.storage-bar { height:8px; border-radius:999px; background:var(--inset); overflow:hidden; }
+.storage-bar > span { display:block; height:100%; border-radius:inherit; background:var(--lime); transition:width .3s ease; }
+.storage-bar.is-full > span { background:var(--red); }
+.storage-file-name { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.storage-confirm { display:flex; gap:6px; flex-shrink:0; }
+.settings-empty { color:var(--muted); font-size:calc(13px * var(--ui-scale)); }
 
 /* Quick wins: to-do progress, collapsed cards, lock, tags, search. */
 .board-todo-progress { display:flex; align-items:center; gap:8px; margin-bottom:8px; }

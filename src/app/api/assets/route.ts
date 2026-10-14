@@ -16,18 +16,21 @@ const IMAGE_FILE = /\.(png|jpe?g|webp|gif)$/i;
 const STORAGE_QUOTA_BYTES = (Number(process.env.STORAGE_QUOTA_MB) || 1024) * 1024 * 1024;
 const quotaLabel = () => `${Math.round(STORAGE_QUOTA_BYTES / 1_048_576).toLocaleString("en-US")} MB`;
 
-async function storageUsed(owner: string) {
-  let used = 0;
+async function accountFiles(owner: string) {
+  const blobs: { pathname: string; size: number; uploadedAt: Date }[] = [];
   let cursor: string | undefined;
   do {
     const page = await list({ prefix: `board-assets/${owner}/`, cursor, limit: 1000 });
-    for (const blob of page.blobs) used += blob.size;
+    blobs.push(...page.blobs);
     cursor = page.hasMore ? page.cursor : undefined;
   } while (cursor);
-  return used;
+  return blobs;
 }
 
-const quotaError = () => `Your storage is full (${quotaLabel()}). Delete unused images to make room.`;
+const storageUsed = async (owner: string) =>
+  (await accountFiles(owner)).reduce((total, blob) => total + blob.size, 0);
+
+const quotaError = () => `Your storage is full (${quotaLabel()}). Delete unused files in Settings → Storage to make room.`;
 
 // Which of this user's boards (including deleted ones and card trash) point at each file.
 // A file is only "unused" when nothing could still show it, so deleting it is always safe.
@@ -36,18 +39,20 @@ async function boardsUsing(owner: string) {
     (await db.query("select id, title, cards, trash from boards where owner_id=$1", [owner])).rows,
   );
   const usage = new Map<string, Map<string, string>>();
+  const names = new Map<string, string>();
   for (const board of found as { id: string; title: string; cards: unknown; trash: unknown }[]) {
     for (const list of [board.cards, board.trash]) {
       if (!Array.isArray(list)) continue;
-      for (const card of list as { image?: unknown }[]) {
+      for (const card of list as { image?: unknown; file_name?: unknown }[]) {
         const image = typeof card?.image === "string" ? card.image : "";
         if (!image) continue;
+        if (typeof card.file_name === "string" && card.file_name) names.set(image, card.file_name);
         if (!usage.has(image)) usage.set(image, new Map());
         usage.get(image)!.set(board.id, board.title);
       }
     }
   }
-  return usage;
+  return { usage, names };
 }
 
 export async function POST(request: Request) {
@@ -144,19 +149,33 @@ export async function GET(request: Request) {
       return NextResponse.json({ error: "Couldn't check your storage. Try again." }, { status: 503 });
     }
   }
+  // Every uploaded file with where it's used, for managing storage in settings.
+  if (params.get("files")) {
+    if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    try {
+      const [blobs, { usage, names }] = await Promise.all([accountFiles(user.id), boardsUsing(user.id)]);
+      const items = blobs
+        .sort((a, b) => b.size - a.size)
+        .map((blob) => ({
+          path: blob.pathname,
+          name: names.get(blob.pathname) ?? "",
+          size: blob.size,
+          uploaded_at: new Date(blob.uploadedAt).toISOString(),
+          used_on: [...(usage.get(blob.pathname) ?? new Map<string, string>()).values()],
+        }));
+      const used = blobs.reduce((total, blob) => total + blob.size, 0);
+      return NextResponse.json({ items, used, quota: STORAGE_QUOTA_BYTES }, { headers: { "Cache-Control": "private, no-store" } });
+    } catch (error) {
+      console.error("File list failed", error);
+      return NextResponse.json({ error: "Couldn't load your files. Try again." }, { status: 503 });
+    }
+  }
   // The image library: everything this user has uploaded, newest first, with where it is used.
   if (params.get("list")) {
     if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     try {
-      const prefix = `board-assets/${user.id}/`;
-      const blobs: { pathname: string; size: number; uploadedAt: Date }[] = [];
-      let cursor: string | undefined;
-      do {
-        const page = await list({ prefix, cursor, limit: 200 });
-        blobs.push(...page.blobs);
-        cursor = page.hasMore ? page.cursor : undefined;
-      } while (cursor && blobs.length < 1000);
-      const usage = await boardsUsing(user.id);
+      const blobs = await accountFiles(user.id);
+      const { usage } = await boardsUsing(user.id);
       const items = blobs
         .filter((blob) => IMAGE_FILE.test(blob.pathname))
         .sort((a, b) => +new Date(b.uploadedAt) - +new Date(a.uploadedAt))
@@ -216,7 +235,7 @@ export async function GET(request: Request) {
   return new NextResponse(result.stream, { headers });
 }
 
-// Remove an uploaded image, but only when no board (or board trash) still uses it.
+// Remove an uploaded file, but only when no board (or board trash) still uses it.
 export async function DELETE(request: Request) {
   if (unavailable()) return NextResponse.json({ error: "File storage is not configured." }, { status: 503 });
   if (request.headers.get("origin") !== new URL(request.url).origin)
@@ -225,19 +244,19 @@ export async function DELETE(request: Request) {
   if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   const input = await request.json().catch(() => null);
   const path = typeof input?.path === "string" ? input.path : "";
-  if (!path.startsWith(`board-assets/${user.id}/`) || path.includes("..") || !IMAGE_FILE.test(path))
+  if (!path.startsWith(`board-assets/${user.id}/`) || path.includes(".."))
     return NextResponse.json({ error: "Invalid file." }, { status: 400 });
   try {
-    const users = (await boardsUsing(user.id)).get(path);
+    const users = (await boardsUsing(user.id)).usage.get(path);
     if (users?.size)
       return NextResponse.json(
-        { error: `This image is used on ${users.size} ${users.size === 1 ? "board" : "boards"}.`, used_on: [...users.values()] },
+        { error: `This file is used on ${users.size} ${users.size === 1 ? "board" : "boards"}.`, used_on: [...users.values()] },
         { status: 409 },
       );
     await del(path);
     return NextResponse.json({ ok: true });
   } catch (error) {
-    console.error("Image delete failed", error);
-    return NextResponse.json({ error: "Couldn't delete that image. Try again." }, { status: 503 });
+    console.error("File delete failed", error);
+    return NextResponse.json({ error: "Couldn't delete that file. Try again." }, { status: 503 });
   }
 }

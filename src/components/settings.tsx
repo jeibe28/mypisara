@@ -1,7 +1,7 @@
 "use client";
 import { useEffect, useRef, useState, type ChangeEvent, type FormEvent } from "react";
 import { useRouter } from "next/navigation";
-import { BadgeCheck, Camera, Check, Laptop, MailWarning, Monitor, Moon, Smartphone, Sun, Trash2 } from "lucide-react";
+import { BadgeCheck, Camera, Check, File as FileGeneric, FileAudio, FileImage, FileVideo, Laptop, MailWarning, Monitor, Moon, Smartphone, Sun, Trash2 } from "lucide-react";
 import { authClient } from "@/lib/auth-client";
 import { AVATAR_MAX_BYTES, AVATAR_SIZE } from "@/lib/avatar";
 import {
@@ -380,6 +380,118 @@ function SessionsSection() {
   );
 }
 
+type StoredFile = { path: string; name: string; size: number; uploaded_at: string; used_on: string[] };
+
+function bytesLabel(bytes: number) {
+  if (bytes < 1024 * 1024) return `${Math.max(bytes ? 1 : 0, Math.round(bytes / 1024))} KB`;
+  if (bytes < 1024 ** 3) return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+  return `${(bytes / 1024 ** 3).toFixed(2)} GB`;
+}
+
+function fileIcon(path: string) {
+  if (/\.(png|jpe?g|webp|gif)$/i.test(path)) return FileImage;
+  if (/\.(mp4|webm|mov|quicktime)$/i.test(path)) return FileVideo;
+  if (/\.(mp3|mpeg|wav|m4a)$/i.test(path)) return FileAudio;
+  return FileGeneric;
+}
+
+// Uploaded files count against the account's storage. Files still on a board (or in a
+// board's trash) can't be deleted here, so removing one never breaks a card.
+function StorageSection() {
+  const [data, setData] = useState<{ items: StoredFile[]; used: number; quota: number } | null>(null);
+  const [error, setError] = useState("");
+  const [confirm, setConfirm] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  async function load() {
+    setError("");
+    try {
+      const response = await fetch("/api/assets?files=1", { cache: "no-store" });
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(body.error || "Couldn't load your files.");
+      setData(body);
+    } catch (value) {
+      setError(value instanceof Error ? value.message : "Couldn't load your files.");
+    }
+  }
+  useEffect(() => {
+    void load();
+  }, []);
+  async function remove(path: string) {
+    setBusy(true);
+    setError("");
+    try {
+      const response = await fetch("/api/assets", {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ path }),
+      });
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(body.error || "Couldn't delete that file.");
+      setData((current) => {
+        if (!current) return current;
+        const removed = current.items.find((item) => item.path === path);
+        return { ...current, items: current.items.filter((item) => item.path !== path), used: current.used - (removed?.size ?? 0) };
+      });
+    } catch (value) {
+      setError(value instanceof Error ? value.message : "Couldn't delete that file.");
+    } finally {
+      setConfirm(null);
+      setBusy(false);
+    }
+  }
+  const unused = (data?.items ?? []).filter((item) => !item.used_on.length);
+  const percent = data ? Math.min(100, Math.round((data.used / data.quota) * 100)) : 0;
+  return (
+    <section className="settings-section" aria-labelledby="storage-heading">
+      <h3 id="storage-heading">Storage</h3>
+      <p>Images, videos and files you&apos;ve uploaded to your boards.</p>
+      {data === null && !error && <div className="skeleton" style={{ height: 52 }} aria-label="Loading storage" />}
+      {data && (
+        <div className="storage-meter">
+          <div className="storage-meter-text">
+            <strong>{bytesLabel(data.used)} of {bytesLabel(data.quota)} used</strong>
+            <small>{data.items.length} {data.items.length === 1 ? "file" : "files"}{unused.length ? ` · ${unused.length} not on any board` : ""}</small>
+          </div>
+          <div className={`storage-bar${percent >= 90 ? " is-full" : ""}`} role="progressbar" aria-label="Storage used" aria-valuemin={0} aria-valuemax={100} aria-valuenow={percent}>
+            <span style={{ width: `${percent}%` }} />
+          </div>
+        </div>
+      )}
+      {error && <div className="form-error" role="alert">{error}</div>}
+      {!!data?.items.length && (
+        <ul className="session-list" aria-label="Your uploaded files">
+          {data.items.map((item) => {
+            const Icon = fileIcon(item.path);
+            const uses = item.used_on.length;
+            return (
+              <li key={item.path}>
+                <Icon size={18} aria-hidden="true" />
+                <div>
+                  <strong className="storage-file-name">{item.name || item.path.split("/").pop()}</strong>
+                  <small title={item.used_on.join(", ")}>
+                    {bytesLabel(item.size)} · {uses ? `On ${uses === 1 ? `“${item.used_on[0]}”` : `${uses} boards`}` : "Not on any board"}
+                  </small>
+                </div>
+                {!uses && (confirm === item.path ? (
+                  <span className="storage-confirm">
+                    <button className="btn btn-danger" disabled={busy} onClick={() => void remove(item.path)}>Delete</button>
+                    <button className="btn" disabled={busy} onClick={() => setConfirm(null)}>Keep</button>
+                  </span>
+                ) : (
+                  <button className="btn btn-ghost" aria-label={`Delete ${item.name || "this file"}`} title="Delete this file" onClick={() => setConfirm(item.path)}>
+                    <Trash2 size={15} />
+                  </button>
+                ))}
+              </li>
+            );
+          })}
+        </ul>
+      )}
+      {data && !data.items.length && <p className="settings-empty">You haven&apos;t uploaded any files yet.</p>}
+    </section>
+  );
+}
+
 const themes: { value: ThemePreference; label: string; icon: typeof Sun }[] = [
   { value: "light", label: "Light", icon: Sun },
   { value: "dark", label: "Dark", icon: Moon },
@@ -457,9 +569,9 @@ export function Settings() {
   const { prefs, update, syncError } = usePreferences(signedIn);
   const account = !demo && user;
   const tabs = account
-    ? ([["profile", "Profile"], ["appearance", "Appearance"], ["security", "Security"]] as const)
+    ? ([["profile", "Profile"], ["appearance", "Appearance"], ["storage", "Storage"], ["security", "Security"]] as const)
     : ([["appearance", "Appearance"]] as const);
-  const [tab, setTab] = useState<"profile" | "appearance" | "security">(account ? "profile" : "appearance");
+  const [tab, setTab] = useState<"profile" | "appearance" | "storage" | "security">(account ? "profile" : "appearance");
   return (
     <div className="settings-page">
       <header>
@@ -511,6 +623,11 @@ export function Settings() {
               <Choices label="Interface size" value={prefs.size} options={sizes} onChange={(size) => update({ size })} />
             </div>
           </section>
+        </div>
+      )}
+      {account && tab === "storage" && (
+        <div role="tabpanel" id="panel-storage" aria-labelledby="tab-storage" className="settings-group">
+          <StorageSection />
         </div>
       )}
       {account && tab === "security" && (
